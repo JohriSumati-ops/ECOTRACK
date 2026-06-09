@@ -76,9 +76,9 @@ export default function Home() {
         className="flex gap-8 mt-10 mb-10"
       >
         {[
-          { value: "2.4T", label: "kg CO₂ tracked" },
-          { value: "180K", label: "actions completed" },
-          { value: "94%", label: "users stay consistent" },
+          { value: "6.4", label: "kg CO₂ tracked" },
+          { value: "500+", label: "actions completed" },
+          { value: "74%", label: "users stay consistent" },
         ].map((stat) => (
           <div key={stat.label} className="text-center">
             <p className="text-green-500 text-2xl font-bold">{stat.value}</p>
