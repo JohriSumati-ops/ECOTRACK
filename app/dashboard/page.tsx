@@ -1,11 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getAuth, onAuthStateChanged } from "firebase/auth";
-import { getFirestore, doc, getDoc } from "firebase/firestore";
-import { useRouter } from "next/navigation";
+import { getFirestore, doc, getDoc, updateDoc, arrayUnion } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyBvp7ToXJ8TrnjhI0dYvWYZ2WT6DIZyx6Q",
@@ -20,148 +19,422 @@ const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const auth = getAuth(app);
 const db = getFirestore(app);
 
-const PERSONA_META: Record<string, { label: string; emoji: string; color: string }> = {
-  urban_commuter:     { label: "Urban Commuter",      emoji: "🚇", color: "bg-blue-500" },
-  budget_saver:       { label: "Budget Saver",         emoji: "💰", color: "bg-yellow-500" },
-  busy_professional:  { label: "Busy Professional",    emoji: "💼", color: "bg-purple-500" },
-  conscious_beginner: { label: "Conscious Beginner",   emoji: "🌱", color: "bg-green-500" },
-  eco_enthusiast:     { label: "Eco Enthusiast",       emoji: "🌍", color: "bg-emerald-500" },
-  convenience_seeker: { label: "Convenience Seeker",   emoji: "⚡", color: "bg-orange-500" },
-};
+// ── Types ──
+interface UserProfile {
+  personas: Record<string, number>;
+  carbon_breakdown: { transport: number; food: number; energy: number };
+  top_persona: string;
+  monthly_kg_co2: number;
+  insight: string;
+  streak: number;
+  completed_actions: string[];
+}
 
-const ACTION_CARDS = [
-  { id: "carpool",      title: "Carpool once this week",        impact: "Save 3.2 kg CO₂", effort: "Low effort",    emoji: "🚗", category: "transport", tag: "Quick Win",   tagColor: "bg-green-500"  },
-  { id: "meatless",     title: "Try a meatless Monday",         impact: "Save 2.5 kg CO₂", effort: "Low effort",    emoji: "🥗", category: "food",      tag: "Popular",     tagColor: "bg-blue-500"   },
-  { id: "coldwash",     title: "Wash clothes in cold water",    impact: "Save 0.6 kg CO₂", effort: "Zero effort",   emoji: "🧺", category: "energy",    tag: "Zero Effort", tagColor: "bg-purple-500" },
-  { id: "metro",        title: "Take metro instead of car",     impact: "Save 4.1 kg CO₂", effort: "Medium effort", emoji: "🚇", category: "transport", tag: "High Impact", tagColor: "bg-red-500"    },
-  { id: "thermostat",   title: "Lower thermostat by 2°C",       impact: "Save 1.8 kg CO₂", effort: "Zero effort",   emoji: "🌡️", category: "energy",    tag: "Quick Win",   tagColor: "bg-green-500"  },
-  { id: "localproduce", title: "Buy local produce this week",   impact: "Save 1.2 kg CO₂", effort: "Low effort",    emoji: "🥦", category: "food",      tag: "Trending",    tagColor: "bg-yellow-500" },
+// ── Recommendation engine ──
+const allRecommendations = [
+  {
+    id: "metro_wed",
+    emoji: "🚇",
+    title: "Metro Wednesdays",
+    category: "Transport",
+    save_kg: 18,
+    effort: "Low effort",
+    effort_time: "0 min setup",
+    why_key: "transport",
+    why_text: "Transport is your biggest emission source.",
+    section: "recommended",
+    tag: "Top Pick",
+    tagColor: "text-green-400",
+  },
+  {
+    id: "veg_thursday",
+    emoji: "🥗",
+    title: "Vegetarian Thursdays",
+    category: "Food",
+    save_kg: 12,
+    effort: "Easy swap",
+    effort_time: "1 meal change",
+    why_key: "food",
+    why_text: "Food choices are your second biggest lever.",
+    section: "quick_wins",
+    tag: "🔥 Trending",
+    tagColor: "text-orange-400",
+  },
+  {
+    id: "smart_charge",
+    emoji: "🔌",
+    title: "Smart Charging Habit",
+    category: "Energy",
+    save_kg: 6,
+    effort: "Quick win",
+    effort_time: "30 sec",
+    why_key: "energy",
+    why_text: "Small energy habits compound over months.",
+    section: "quick_wins",
+    tag: "⚡ Quick Win",
+    tagColor: "text-yellow-400",
+  },
+  {
+    id: "reusable_bag",
+    emoji: "🛍️",
+    title: "Reusable Bag Week",
+    category: "Lifestyle",
+    save_kg: 4,
+    effort: "Zero friction",
+    effort_time: "Already own one",
+    why_key: "food",
+    why_text: "Small habit signals, big mindset shift.",
+    section: "weekend",
+    tag: "🌱 Starter",
+    tagColor: "text-green-400",
+  },
+  {
+    id: "cold_wash",
+    emoji: "🧺",
+    title: "Cold Water Laundry",
+    category: "Energy",
+    save_kg: 8,
+    effort: "One setting change",
+    effort_time: "10 sec",
+    why_key: "energy",
+    why_text: "90% of laundry energy goes to heating water.",
+    section: "low_effort",
+    tag: "💡 Smart",
+    tagColor: "text-blue-400",
+  },
+  {
+    id: "carpool_friday",
+    emoji: "🚗",
+    title: "Carpool Fridays",
+    category: "Transport",
+    save_kg: 14,
+    effort: "Social habit",
+    effort_time: "One message",
+    why_key: "transport",
+    why_text: "Sharing rides halves transport emissions instantly.",
+    section: "recommended",
+    tag: "👥 Social",
+    tagColor: "text-purple-400",
+  },
 ];
 
-function ThemeToggle({ theme, toggle }: { theme: string; toggle: () => void }) {
+const personaLabels: Record<string, string> = {
+  urban_commuter: "Urban Commuter",
+  budget_saver: "Budget Saver",
+  busy_professional: "Busy Professional",
+  conscious_beginner: "Conscious Beginner",
+  eco_enthusiast: "Eco Enthusiast",
+  convenience_seeker: "Convenience Seeker",
+};
+
+const personaEmojis: Record<string, string> = {
+  urban_commuter: "🚇",
+  budget_saver: "💰",
+  busy_professional: "💼",
+  conscious_beginner: "🌱",
+  eco_enthusiast: "🌍",
+  convenience_seeker: "⚡",
+};
+
+const sectionTitles: Record<string, string> = {
+  recommended: "✨ Recommended For You",
+  quick_wins: "⚡ Quick Wins",
+  weekend: "🌅 Weekend Habits",
+  low_effort: "💡 Low Effort, High Impact",
+};
+
+// ── Action Card ──
+function ActionCard({
+  rec,
+  profile,
+  completed,
+  onComplete,
+}: {
+  rec: typeof allRecommendations[0];
+  profile: UserProfile;
+  completed: boolean;
+  onComplete: (id: string) => void;
+}) {
+  const breakdownValue =
+    profile.carbon_breakdown[rec.why_key as keyof typeof profile.carbon_breakdown] || 30;
+
   return (
-    <button
-      onClick={toggle}
-      style={{
-        background: "var(--bg-card)",
-        border: "1px solid var(--border)",
-        color: "var(--text-primary)",
-        borderRadius: "9999px",
-        padding: "4px 12px",
-        fontSize: "14px",
-        cursor: "pointer",
-        transition: "all 0.2s",
-      }}
+    <motion.div
+      layout
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      whileHover={{ scale: 1.02, y: -4 }}
+      className={`bg-[#141414] border rounded-2xl p-5 flex flex-col gap-3 transition-colors duration-200 ${
+        completed
+          ? "border-green-500/40 opacity-60"
+          : "border-[#2a2a2a] hover:border-green-500/40"
+      }`}
     >
-      {theme === "dark" ? "☀️ Light" : "🌙 Dark"}
-    </button>
+      {/* Top row */}
+      <div className="flex justify-between items-start">
+        <span className="text-3xl">{rec.emoji}</span>
+        <span className={`text-xs font-semibold ${rec.tagColor}`}>{rec.tag}</span>
+      </div>
+
+      {/* Title */}
+      <div>
+        <h3 className="text-white font-bold text-base">{rec.title}</h3>
+        <p className="text-gray-500 text-xs mt-0.5">{rec.category}</p>
+      </div>
+
+      {/* Stats row */}
+      <div className="flex gap-3">
+        <div className="bg-[#0a0a0a] rounded-lg px-3 py-2 flex-1 text-center">
+          <p className="text-green-400 font-bold text-sm">{rec.save_kg}kg</p>
+          <p className="text-gray-600 text-xs">CO₂/month</p>
+        </div>
+        <div className="bg-[#0a0a0a] rounded-lg px-3 py-2 flex-1 text-center">
+          <p className="text-blue-400 font-bold text-sm">{rec.effort_time}</p>
+          <p className="text-gray-600 text-xs">{rec.effort}</p>
+        </div>
+      </div>
+
+      {/* Why this for YOU */}
+      <div className="bg-[#0f1f0f] border border-green-900/40 rounded-lg px-3 py-2">
+        <p className="text-green-500 text-xs font-semibold mb-0.5">
+          Why for YOU?
+        </p>
+        <p className="text-gray-400 text-xs">
+          {rec.why_text}{" "}
+          <span className="text-green-400 font-semibold">
+            ({breakdownValue}% of your footprint)
+          </span>
+        </p>
+      </div>
+
+      {/* CTA */}
+      {completed ? (
+        <div className="flex items-center justify-center gap-2 py-2">
+          <span className="text-green-500 text-sm font-semibold">✓ Committed</span>
+        </div>
+      ) : (
+        <motion.button
+          whileHover={{ scale: 1.02 }}
+          whileTap={{ scale: 0.97 }}
+          onClick={() => onComplete(rec.id)}
+          className="w-full bg-green-500 hover:bg-green-400 text-black font-bold py-2.5 rounded-xl text-sm transition-colors"
+        >
+          I'll Try This
+        </motion.button>
+      )}
+    </motion.div>
   );
 }
 
+// ── Main Dashboard ──
 export default function Dashboard() {
-  const router = useRouter();
-  const [userData, setUserData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [userName, setUserName] = useState("there");
   const [completed, setCompleted] = useState<string[]>([]);
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
-
-  useEffect(() => {
-    const saved = localStorage.getItem("ecotrack-theme") as "dark" | "light";
-    if (saved) setTheme(saved);
-  }, []);
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("ecotrack-theme", theme);
-  }, [theme]);
-
-  const toggleTheme = () => setTheme(t => t === "dark" ? "light" : "dark");
+  const [activeSection, setActiveSection] = useState("recommended");
+  const [showConfetti, setShowConfetti] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
-      if (!user) { router.push("/"); return; }
-      const snap = await getDoc(doc(db, "users", user.uid));
-      if (snap.exists()) setUserData(snap.data());
+      if (user) {
+        setUserName(user.displayName?.split(" ")[0] || "there");
+        try {
+          const snap = await getDoc(doc(db, "users", user.uid));
+          if (snap.exists()) {
+            const data = snap.data() as UserProfile;
+            setProfile(data);
+            setCompleted(data.completed_actions || []);
+          }
+        } catch (e) {
+          console.warn("Firestore read failed, using demo data");
+          setProfile(demoProfile);
+        }
+      } else {
+        setProfile(demoProfile);
+        setUserName("Demo");
+      }
       setLoading(false);
     });
     return () => unsub();
   }, []);
 
-  const toggleComplete = (id: string) => {
-    setCompleted(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+  const handleComplete = async (id: string) => {
+    const newCompleted = [...completed, id];
+    setCompleted(newCompleted);
+    setShowConfetti(true);
+    setTimeout(() => setShowConfetti(false), 2000);
+
+    try {
+      const user = auth.currentUser;
+      if (user) {
+        await updateDoc(doc(db, "users", user.uid), {
+          completed_actions: arrayUnion(id),
+          streak: (profile?.streak || 0) + 1,
+        });
+      }
+    } catch (e) {
+      console.warn("Could not update Firestore");
+    }
   };
 
   if (loading) {
     return (
-      <main style={{ backgroundColor: "var(--bg)" }} className="min-h-screen flex items-center justify-center">
-        <motion.div animate={{ rotate: 360 }} transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }} className="text-5xl">
+      <main className="min-h-screen bg-[#0a0a0a] flex items-center justify-center">
+        <motion.div
+          animate={{ rotate: 360 }}
+          transition={{ duration: 1.5, repeat: Infinity, ease: "linear" }}
+          className="text-5xl"
+        >
           🌿
         </motion.div>
       </main>
     );
   }
 
-  const persona = userData?.top_persona || "conscious_beginner";
-  const personaMeta = PERSONA_META[persona];
-  const co2 = userData?.monthly_kg_co2 || 220;
-  const insight = userData?.insight || "Start small — every action compounds.";
-  const breakdown = userData?.carbon_breakdown || { transport: 40, food: 35, energy: 25 };
+  if (!profile) return null;
+
+  const topPersonas = Object.entries(profile.personas)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3);
+
+  const biggestCategory = Object.entries(profile.carbon_breakdown).sort(
+    (a, b) => b[1] - a[1]
+  )[0];
+
+  const filteredRecs = allRecommendations.filter(
+    (r) => r.section === activeSection
+  );
+
+  const totalSaved = completed.reduce((acc, id) => {
+    const rec = allRecommendations.find((r) => r.id === id);
+    return acc + (rec?.save_kg || 0);
+  }, 0);
+
+  const hour = new Date().getHours();
+  const greeting =
+    hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
 
   return (
-    <main style={{ backgroundColor: "var(--bg)", color: "var(--text-primary)" }} className="min-h-screen px-4 py-8 max-w-2xl mx-auto">
+    <main className="min-h-screen bg-[#0a0a0a] px-4 py-8 max-w-2xl mx-auto">
 
-      {/* Header */}
-      <motion.div initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }} className="flex items-center justify-between mb-8">
-        <span style={{ color: "var(--text-primary)" }} className="text-xl font-bold">
-          🌿 Eco<span className="text-green-500">Track</span>
-        </span>
-        <div className="flex items-center gap-3">
-          <ThemeToggle theme={theme} toggle={toggleTheme} />
-          <button onClick={() => router.push("/insights")} className="text-green-500 text-sm font-semibold hover:underline">
-            View Wrapped →
-          </button>
-          <span style={{ color: "var(--text-muted)" }} className="text-sm">🔥 {completed.length} done today</span>
-        </div>
-      </motion.div>
+      {/* ── Confetti moment ── */}
+      <AnimatePresence>
+        {showConfetti && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.8, y: -20 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, y: -20 }}
+            className="fixed top-6 left-1/2 -translate-x-1/2 z-50 bg-green-500 text-black font-bold px-6 py-3 rounded-full shadow-lg"
+          >
+            🌱 Habit committed! +1 streak
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-      {/* Persona Badge */}
+      {/* ── Header ── */}
       <motion.div
-        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}
-        style={{ background: "var(--bg-card)", borderColor: "var(--border)" }}
-        className="border rounded-2xl p-5 mb-4"
+        initial={{ opacity: 0, y: -10 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex items-center justify-between mb-8"
       >
-        <div className="flex items-center gap-3 mb-3">
-          <span className={`${personaMeta.color} text-white text-xs font-bold px-3 py-1 rounded-full`}>
-            {personaMeta.emoji} {personaMeta.label}
+        <div>
+          <p className="text-gray-500 text-sm">{greeting}</p>
+          <h1 className="text-white text-xl font-bold">
+            {userName} 🌱
+          </h1>
+        </div>
+        <div className="flex items-center gap-2 bg-[#141414] border border-[#2a2a2a] rounded-full px-4 py-2">
+          <span className="text-orange-400">🔥</span>
+          <span className="text-white font-bold text-sm">
+            {(profile.streak || 0) + completed.length}
           </span>
+          <span className="text-gray-500 text-xs">day streak</span>
         </div>
-        <p style={{ color: "var(--text-secondary)" }} className="text-sm leading-relaxed">"{insight}"</p>
       </motion.div>
 
-      {/* Carbon Score */}
+      {/* ── Hero insight card ── */}
       <motion.div
-        initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}
-        style={{ background: "var(--bg-card)", borderColor: "var(--border)" }}
-        className="border rounded-2xl p-5 mb-4"
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.1 }}
+        className="bg-gradient-to-br from-green-900/40 to-[#141414] border border-green-800/40 rounded-2xl p-6 mb-6"
       >
-        <p style={{ color: "var(--text-muted)" }} className="text-xs uppercase tracking-widest mb-1">Your monthly footprint</p>
-        <p style={{ color: "var(--text-primary)" }} className="text-4xl font-bold">
-          {co2} <span className="text-green-500 text-lg">kg CO₂</span>
-        </p>
+        <p className="text-gray-400 text-sm mb-1">Based on your lifestyle</p>
+        <h2 className="text-white text-lg font-bold leading-snug">
+          {profile.insight}
+        </h2>
+        <div className="flex items-center gap-4 mt-4">
+          <div>
+            <p className="text-gray-500 text-xs">Biggest impact area</p>
+            <p className="text-green-400 font-bold capitalize text-sm mt-0.5">
+              {biggestCategory[0] === "transport" ? "🚗" : biggestCategory[0] === "food" ? "🍽️" : "⚡"}{" "}
+              {biggestCategory[0]} — {biggestCategory[1]}%
+            </p>
+          </div>
+          <div className="ml-auto text-right">
+            <p className="text-gray-500 text-xs">Monthly footprint</p>
+            <p className="text-white font-bold text-sm mt-0.5">
+              {profile.monthly_kg_co2} kg CO₂
+            </p>
+          </div>
+        </div>
+      </motion.div>
 
-        <div className="mt-4 flex flex-col gap-2">
-          {Object.entries(breakdown).map(([key, val]: any) => (
+      {/* ── Progress this month ── */}
+      {completed.length > 0 && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="bg-[#141414] border border-[#2a2a2a] rounded-2xl p-5 mb-6"
+        >
+          <p className="text-gray-400 text-xs font-semibold uppercase tracking-widest mb-3">
+            Your impact so far
+          </p>
+          <div className="flex gap-4">
+            <div className="text-center flex-1">
+              <p className="text-green-400 text-2xl font-black">{totalSaved}</p>
+              <p className="text-gray-500 text-xs">kg CO₂ committed</p>
+            </div>
+            <div className="text-center flex-1">
+              <p className="text-blue-400 text-2xl font-black">{completed.length}</p>
+              <p className="text-gray-500 text-xs">habits started</p>
+            </div>
+            <div className="text-center flex-1">
+              <p className="text-purple-400 text-2xl font-black">
+                🌳 {Math.floor(totalSaved / 15)}
+              </p>
+              <p className="text-gray-500 text-xs">trees equivalent</p>
+            </div>
+          </div>
+        </motion.div>
+      )}
+
+      {/* ── Sustainability DNA ── */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.2 }}
+        className="bg-[#141414] border border-[#2a2a2a] rounded-2xl p-5 mb-6"
+      >
+        <p className="text-gray-400 text-xs font-semibold uppercase tracking-widest mb-4">
+          Your Sustainability DNA
+        </p>
+        <div className="flex flex-col gap-3">
+          {topPersonas.map(([key, value], i) => (
             <div key={key}>
-              <div style={{ color: "var(--text-muted)" }} className="flex justify-between text-xs mb-1">
-                <span className="capitalize">{key}</span>
-                <span>{val}%</span>
+              <div className="flex justify-between mb-1">
+                <span className="text-white text-sm">
+                  {personaEmojis[key]} {personaLabels[key]}
+                </span>
+                <span className="text-green-400 text-sm font-bold">{value}%</span>
               </div>
-              <div style={{ backgroundColor: "var(--border)" }} className="w-full rounded-full h-1.5">
+              <div className="w-full bg-[#0a0a0a] rounded-full h-1.5">
                 <motion.div
                   initial={{ width: 0 }}
-                  animate={{ width: `${val}%` }}
-                  transition={{ duration: 0.8, delay: 0.4 }}
-                  className="bg-green-500 h-1.5 rounded-full"
+                  animate={{ width: `${value}%` }}
+                  transition={{ duration: 0.8, delay: 0.3 + i * 0.1 }}
+                  className="bg-gradient-to-r from-green-500 to-green-400 h-1.5 rounded-full"
                 />
               </div>
             </div>
@@ -169,49 +442,104 @@ export default function Dashboard() {
         </div>
       </motion.div>
 
-      {/* Action Cards */}
-      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
-        <h2 style={{ color: "var(--text-primary)" }} className="font-bold text-lg mb-3">Your Actions Today</h2>
-        <div className="flex flex-col gap-3">
-          {ACTION_CARDS.map((card, i) => {
-            const done = completed.includes(card.id);
-            return (
-              <motion.div
-                key={card.id}
-                initial={{ opacity: 0, x: 30 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.1 * i }}
-                onClick={() => toggleComplete(card.id)}
-                style={{
-                  background: done ? "var(--bg-card-done)" : "var(--bg-card)",
-                  borderColor: done ? "#22c55e" : "var(--border)",
-                }}
-                className="cursor-pointer border rounded-2xl p-4 flex items-center gap-4 transition-all duration-200 hover:border-green-500"
-              >
-                <span className="text-3xl">{card.emoji}</span>
-                <div className="flex-1">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className={`${card.tagColor} text-white text-xs font-bold px-2 py-0.5 rounded-full`}>
-                      {card.tag}
-                    </span>
-                  </div>
-                  <p style={{ color: done ? "var(--text-muted)" : "var(--text-primary)" }}
-                     className={`font-semibold text-sm ${done ? "line-through" : ""}`}>
-                    {card.title}
-                  </p>
-                  <p className="text-green-500 text-xs mt-0.5">{card.impact}</p>
-                  <p style={{ color: "var(--text-dimmed)" }} className="text-xs">{card.effort}</p>
-                </div>
-                <div style={{ borderColor: done ? "#22c55e" : "var(--text-muted)", backgroundColor: done ? "#22c55e" : "transparent" }}
-                     className="w-6 h-6 rounded-full border-2 flex items-center justify-center flex-shrink-0">
-                  {done && <span className="text-white text-xs">✓</span>}
-                </div>
-              </motion.div>
-            );
-          })}
+      {/* ── Carbon breakdown ── */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.3 }}
+        className="bg-[#141414] border border-[#2a2a2a] rounded-2xl p-5 mb-6"
+      >
+        <p className="text-gray-400 text-xs font-semibold uppercase tracking-widest mb-4">
+          Carbon Breakdown
+        </p>
+        <div className="flex gap-3">
+          {Object.entries(profile.carbon_breakdown).map(([key, val]) => (
+            <div key={key} className="flex-1 bg-[#0a0a0a] rounded-xl p-3 text-center">
+              <p className="text-2xl">
+                {key === "transport" ? "🚗" : key === "food" ? "🍽️" : "⚡"}
+              </p>
+              <p className="text-white font-bold text-lg mt-1">{val}%</p>
+              <p className="text-gray-500 text-xs capitalize">{key}</p>
+            </div>
+          ))}
         </div>
       </motion.div>
+
+      {/* ── Recommendation feed ── */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ delay: 0.4 }}
+      >
+        {/* Section tabs */}
+        <div className="flex gap-2 overflow-x-auto pb-2 mb-4 scrollbar-hide">
+          {Object.entries(sectionTitles).map(([key, label]) => (
+            <button
+              key={key}
+              onClick={() => setActiveSection(key)}
+              className={`whitespace-nowrap px-4 py-2 rounded-full text-sm font-semibold transition-colors ${
+                activeSection === key
+                  ? "bg-green-500 text-black"
+                  : "bg-[#141414] text-gray-400 border border-[#2a2a2a] hover:border-green-500/40"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* Cards */}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeSection}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0 }}
+            className="flex flex-col gap-4"
+          >
+            {filteredRecs.map((rec) => (
+              <ActionCard
+                key={rec.id}
+                rec={rec}
+                profile={profile}
+                completed={completed.includes(rec.id)}
+                onComplete={handleComplete}
+              />
+            ))}
+          </motion.div>
+        </AnimatePresence>
+      </motion.div>
+
+      {/* ── Footer ── */}
+      <div className="mt-12 text-center">
+        <p className="text-gray-700 text-xs">
+          🌿 EcoTrack — built for real habits, real impact
+        </p>
+      </div>
 
     </main>
   );
 }
+
+// ── Demo fallback data ──
+const demoProfile: UserProfile = {
+  personas: {
+    urban_commuter: 78,
+    budget_saver: 65,
+    busy_professional: 55,
+    conscious_beginner: 44,
+    eco_enthusiast: 30,
+    convenience_seeker: 70,
+  },
+  carbon_breakdown: {
+    transport: 48,
+    food: 32,
+    energy: 20,
+  },
+  top_persona: "urban_commuter",
+  monthly_kg_co2: 320,
+  insight:
+    "Your commute is your biggest carbon opportunity — small changes here have outsized impact.",
+  streak: 3,
+  completed_actions: [],
+};
